@@ -1,0 +1,17 @@
+//using PIO to blink an LED at 1Hz.
+.program Gen1Hz 
+.wrap_target
+			// Cycles: 1 + 1 + 6 + 32 * (30 + 1) = 1000
+			set	pins, 1
+			set	x, 31	              [5]
+delay_high:
+			nop                       [29]
+			jmp	x--, delay_high
+
+			//Cycles: 1 + 7 + 32 * (30 + 1) = 1000
+			set	pins, 0
+			set	x, 31                  [6]
+delay_low:
+			nop                       [29]
+			jmp x--, delay_low
+.wrap

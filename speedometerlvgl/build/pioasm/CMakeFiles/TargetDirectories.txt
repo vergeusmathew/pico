@@ -1,0 +1,7 @@
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm/CMakeFiles/pioasm.dir
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm/CMakeFiles/edit_cache.dir
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm/CMakeFiles/rebuild_cache.dir
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm/CMakeFiles/list_install_components.dir
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm/CMakeFiles/install.dir
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm/CMakeFiles/install/local.dir
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm/CMakeFiles/install/strip.dir

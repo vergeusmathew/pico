@@ -1,0 +1,5 @@
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm-install/pioasm/pioasm
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm-install/pioasm/pioasmTargets.cmake
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm-install/pioasm/pioasmTargets-release.cmake
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm-install/pioasm/pioasmConfig.cmake
+/home/mathew/rpi-pico/speedometerlvgl/build/pioasm-install/pioasm/pioasmConfigVersion.cmake
