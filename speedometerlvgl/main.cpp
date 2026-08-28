@@ -33,10 +33,21 @@
 #define KEY2_PIN 12  // NAVIGATE / MOVE RING (Middle Button)
 #define KEY1_PIN 13  // ESCAPE / BACK (Bottom Button)
 
+#define TP_IRQ_PIN 9 // Resistive touch panel IRQ (XPT2046 PENIRQ#, active LOW on touch)
+#define TP_CS_PIN  7 // Resistive touch panel chip-select (XPT2046 CS#, active LOW to select)
+
+#define HALL_PIN  10  // A3144 Hall-effect wheel speed sensor (magnet on spoke, active LOW pulse)
+
 // Shared non-blocking button state triggers updated by hardware ISR lines
 volatile bool key1_pressed = false;
 volatile bool key2_pressed = false;
 volatile bool key3_pressed = false;
+
+// Hall-effect wheel speed sensor pulse timing, written from shared_button_callback (ISR),
+// read from gui.cpp's speedometer update timer. Plain 32-bit reads/writes are atomic on
+// the RP2040's Cortex-M0+, so no locking is needed for these.
+volatile uint32_t g_hall_last_pulse_us = 0;    // time_us_32() timestamp of the last accepted pulse (0 = none yet)
+volatile uint32_t g_hall_last_interval_us = 0; // time between the last two accepted pulses
 
 extern volatile bool g_wifi_hotspot_available;
 extern volatile bool g_rtc_sync_successful;
@@ -141,10 +152,28 @@ int main() {
     gpio_init(KEY2_PIN); gpio_set_dir(KEY2_PIN, GPIO_IN); gpio_disable_pulls(KEY2_PIN);
     gpio_init(KEY3_PIN); gpio_set_dir(KEY3_PIN, GPIO_IN); gpio_disable_pulls(KEY3_PIN);
 
+    // TP_IRQ already has a 10k pull-up to VCC-3V3 on the TFT module (R11), so no
+    // internal pull-up is required here. Just configure as a plain input.
+    gpio_init(TP_IRQ_PIN); gpio_set_dir(TP_IRQ_PIN, GPIO_IN); gpio_disable_pulls(TP_IRQ_PIN);
+
+    // TP_CS MUST be actively driven. XPT2046 disables PENIRQ# (holds it LOW) whenever
+    // CS is LOW/floating. Deselect it (drive HIGH) so the touch IRQ can actually work
+    // until a real SPI touch-read routine takes ownership of this pin.
+    gpio_init(TP_CS_PIN); gpio_set_dir(TP_CS_PIN, GPIO_OUT); gpio_put(TP_CS_PIN, 1);
+
+    // Hall sensor: relies on the module's onboard LED+1k pull-up path to 3.3V (or an
+    // external pull-up if you added one) — no internal pull needed.
+    gpio_init(HALL_PIN); gpio_set_dir(HALL_PIN, GPIO_IN); gpio_disable_pulls(HALL_PIN);
+
     // Attach pins into our plain C linkage shared interrupt pipeline handles
     gpio_set_irq_enabled_with_callback(KEY1_PIN, GPIO_IRQ_EDGE_FALL, true, &shared_button_callback);
     gpio_set_irq_enabled(KEY2_PIN, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(KEY3_PIN, GPIO_IRQ_EDGE_FALL, true);
+
+    // HALL_PIN reuses the callback already registered above via KEY1_PIN — this just
+    // adds HALL_PIN to the set of pins that trigger it. Kept always-enabled (unlike the
+    // keys) since the sensor fires continuously while riding and debounces in software.
+    gpio_set_irq_enabled(HALL_PIN, GPIO_IRQ_EDGE_FALL, true);
 
     printf("LVGL Interface Core Operational. Initializing UI Layout Scenes...\n");
     
@@ -161,6 +190,11 @@ int main() {
     uint32_t current_time = to_ms_since_boot(get_absolute_time());
     uint32_t last_tick = current_time;
 
+    // Touch-driven LED blink state
+    const uint32_t TOUCH_BLINK_MS = 150; // How long the LED stays lit per touch pulse
+    bool touch_was_active = false;
+    uint32_t touch_blink_until = 0;      // 0 = no blink pending
+
     while (true) {
         current_time = to_ms_since_boot(get_absolute_time());
         // Ensure at least 1 millisecond has actually elapsed before updating the engine clock
@@ -168,6 +202,18 @@ int main() {
             uint32_t elapsed = current_time - last_tick;
             lv_tick_inc(elapsed); // Push elapsed ms into the internal LVGL timer wheels
             last_tick = current_time;
+        }
+
+        bool touch_active = !gpio_get(TP_IRQ_PIN);
+        if (touch_active && !touch_was_active) {
+            gpio_put(LED_DEBUG_PIN, 0);
+            touch_blink_until = current_time + TOUCH_BLINK_MS;
+        }
+        touch_was_active = touch_active;
+
+        if (touch_blink_until != 0 && current_time >= touch_blink_until) {
+            gpio_put(LED_DEBUG_PIN, 1);
+            touch_blink_until = 0;
         }
 
         // Periodically executes active layout tasks, refreshes canvas buffers, and checks buttons
@@ -190,6 +236,23 @@ extern "C" void shared_button_callback(uint gpio, uint32_t events) {
     else if (gpio == KEY1_PIN) {
         gpio_set_irq_enabled(KEY1_PIN, GPIO_IRQ_EDGE_FALL, false);
         key1_pressed = true;
+    }
+    else if (gpio == HALL_PIN) {
+        // Capture pulse timing for the wheel speed calculation (done in gui.cpp).
+        // Debounce: reject implausibly fast re-triggers (contact bounce / sensor noise) —
+        // even at 100 km/h on this 32cm wheel, real pulses are >11ms apart, so a 3ms
+        // floor comfortably rejects noise without ever dropping a genuine pulse.
+        uint32_t now = time_us_32();
+        if (g_hall_last_pulse_us == 0) {
+            g_hall_last_pulse_us = now; // first pulse ever seen — just establish the baseline
+        } else {
+            uint32_t interval = now - g_hall_last_pulse_us; // wraps correctly even across 32-bit rollover
+            if (interval > 3000) {
+                g_hall_last_interval_us = interval;
+                g_hall_last_pulse_us = now;
+            }
+            // else: bounce/noise — ignore entirely, don't move the baseline
+        }
     }
 }
 

@@ -18,11 +18,18 @@ add_executable(speedometer
  ds3231.cpp
  Gen1Hz.cpp
  wifi.cpp
+ ui/images.c
+ ui/screens.c
+ ui/styles.c
+ ui/ui.c
+ ui/ui_image_arc_full_small2.c
+
 )
 
 target_include_directories(speedometer PUBLIC 
     ${CMAKE_CURRENT_LIST_DIR}       # Exposes your root workspace folder path
-    ${CMAKE_CURRENT_LIST_DIR}/lvgl # Exposes the internal library directory path location
+    ${CMAKE_CURRENT_LIST_DIR}/lvgl  # Exposes the internal library directory path location
+    ${CMAKE_CURRENT_LIST_DIR}/ui    # Exposes the EEZ Studio generated speedometer UI folder
 )
 
 # USB serial optimizations

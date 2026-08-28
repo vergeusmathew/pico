@@ -6,7 +6,7 @@
 #include "lvgl.h" // Include your new graphics UI framework handle
 
 // Define the absolute Pin Macros matching the KiCad Schematic
-#define LCD_PIN_LED   9   // Schematic net: LED (Pin 11)
+//#define LCD_PIN_LED   9   // Schematic net: LED (Pin 11)
 #define LCD_PIN_RST  14   // Schematic net: LCD_RST (Pin 19)
 #define LCD_PIN_DC   15   // Schematic net: LCD_DC (Pin 20)
 #define LCD_PIN_CS   17   // Schematic net: LCD_CS (Pin 22)
@@ -41,8 +41,8 @@ void LcdDisplay::Inithw() {
     gpio_init(LCD_PIN_DC); gpio_set_dir(LCD_PIN_DC, GPIO_OUT);
     gpio_init(LCD_PIN_RST); gpio_set_dir(LCD_PIN_RST, GPIO_OUT);
     
-    gpio_init(LCD_PIN_LED); gpio_set_dir(LCD_PIN_LED, GPIO_OUT);
-    gpio_disable_pulls(LCD_PIN_LED); gpio_put(LCD_PIN_LED, 1); // Active-Low Backlight OFF
+//    gpio_init(LCD_PIN_LED); gpio_set_dir(LCD_PIN_LED, GPIO_OUT);
+//    gpio_disable_pulls(LCD_PIN_LED); gpio_put(LCD_PIN_LED, 1); // Active-Low Backlight OFF
 
     Init();
 }

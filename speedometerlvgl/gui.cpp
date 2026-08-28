@@ -1,8 +1,11 @@
 #include "gui.hpp"
 #include "lv_image_assets.hpp"
 #include <stdio.h>
+#include <math.h>   // M_PI, for wheel circumference
+#include "pico/time.h" // time_us_32()
 #include "ds3231.hpp"
 #include "hardware/sync.h" // REQUIRED FOR SILICON SPINLOCKS
+#include "ui/screens.h"     // EEZ-generated speedometer screen (objects.main, etc.)
 #define WIFI_SPINLOCK_ID 31
 
 static lv_obj_t * lbl_status_text = nullptr;
@@ -200,7 +203,10 @@ void create_lvgl_home_screen() {
     lv_screen_load(home_screen); // Point layout engine straight to this screen
     
     // 🚀 CRUCIAL MEMORY FIX: Cleanly delete the old sub-settings screen layer!
-    if (old_screen != nullptr) {
+    // EXCEPTION: objects.main (the EEZ speedometer screen) is a persistent, reused
+    // object — never delete it here, or the next ShowSpeedometerDetails() call will
+    // dereference a freed screen.
+    if (old_screen != nullptr && old_screen != objects.main) {
         lv_obj_delete_async(old_screen);
     }
 
@@ -379,6 +385,136 @@ void ShowSettingsSubMenu(){
     lv_refr_now(NULL);
 }
 
+extern bool g_request_indev_reset;
+// 🌟 SPEEDOMETER SCREEN (EEZ Studio generated, objects.main) — created ONCE and reused.
+static bool g_speedometer_screen_ready = false;
+static bool g_speedometer_esc_hooked = false;
+static lv_timer_t * g_speedometer_update_timer = nullptr;
+
+// Wheel geometry: 32cm DIAMETER tyre, one magnet per revolution.
+static const double WHEEL_CIRCUMFERENCE_M = 0.32 * M_PI; // ≈ 1.0053 m
+
+// How long with no new pulse before we treat the wheel as stopped and show 0 km/h.
+static const uint32_t HALL_STALE_TIMEOUT_US = 2000000; // 2 seconds
+
+// The dial's outer scale (scaleOuter0to240) is labeled 0-30 km/h, while the needle's
+// arc range (arc_speedometer / arc_behind_scale) is 0-240 — i.e. 8 arc units per km/h.
+static const double SPEEDOMETER_DIAL_MAX_KMH = 30.0;
+static const double ARC_UNITS_PER_KMH = 240.0 / SPEEDOMETER_DIAL_MAX_KMH;
+
+static void speedometer_update_timer_cb(lv_timer_t * timer) {
+    // Defensive guard, matching the style used by clock_timer_cb: bail out if the
+    // screen's labels aren't around for whatever reason.
+    if (objects.label_speed_kmh == nullptr || objects.arc_speedometer == nullptr) {
+        return;
+    }
+
+    uint32_t last_pulse_us    = g_hall_last_pulse_us;    // atomic 32-bit reads, no locking needed
+    uint32_t last_interval_us = g_hall_last_interval_us;
+    uint32_t now_us           = time_us_32();
+    uint32_t since_last_pulse = now_us - last_pulse_us;  // wraps correctly even across rollover
+
+    double speed_kmh = 0.0;
+    if (last_pulse_us != 0 && last_interval_us != 0 && since_last_pulse < HALL_STALE_TIMEOUT_US) {
+        double interval_s = last_interval_us / 1000000.0;
+        double speed_m_s   = WHEEL_CIRCUMFERENCE_M / interval_s;
+        speed_kmh = speed_m_s * 3.6;
+    }
+    // else: no pulse yet, or the wheel has been still for HALL_STALE_TIMEOUT_US — 0 km/h.
+
+    if (speed_kmh > SPEEDOMETER_DIAL_MAX_KMH) {
+        speed_kmh = SPEEDOMETER_DIAL_MAX_KMH; // Clamp to what the dial can actually show
+    }
+
+    int speed_int = (int)(speed_kmh + 0.5); // round to nearest whole km/h
+
+    char speed_buf[8];
+    snprintf(speed_buf, sizeof(speed_buf), "%03d", speed_int);
+    lv_label_set_text(objects.label_speed_kmh, speed_buf);
+    lv_label_set_text(objects.label_speed_kmh_1, speed_buf);
+
+    int arc_val = (int)(speed_kmh * ARC_UNITS_PER_KMH + 0.5);
+    if (arc_val < 0) arc_val = 0;
+    if (arc_val > 240) arc_val = 240;
+    lv_arc_set_value(objects.arc_speedometer, arc_val);
+}
+
+void ShowSpeedometerDetails() {
+    // Save a handle to the current active screen right before we overwrite it
+    lv_obj_t * old_screen = lv_screen_active();
+
+    // 1. Wipe out all previous object references from the shared navigation group
+    lv_group_remove_all_objs(main_menu_nav_group);
+
+    // 2. Build the EEZ-generated speedometer screen exactly once, then reuse the
+    //    same persistent objects.main instance on every subsequent visit.
+    if (!g_speedometer_screen_ready) {
+        create_screens(); // Populates objects.main (and applies EEZ's default theme)
+        g_speedometer_screen_ready = true;
+    }
+
+    lv_screen_load(objects.main); // Point layout engine straight to this screen
+
+    // This stops ghost layers from trapping your physical keypad focus inputs.
+    // objects.main itself is guarded against deletion inside create_lvgl_home_screen(),
+    // so it's always safe to delete whatever screen we're leaving here.
+    if (old_screen != nullptr && old_screen != objects.main) {
+        lv_obj_delete_async(old_screen);
+    }
+
+    // 3. Hook up the escape button listener to return to the home menu safely.
+    //    Register the callback only once — objects.main persists across visits, so a
+    //    second lv_obj_add_event_cb() call here would stack duplicate handlers.
+    lv_group_add_obj(main_menu_nav_group, objects.main);
+    lv_group_focus_obj(objects.main);
+
+    if (!g_speedometer_esc_hooked) {
+        lv_obj_add_event_cb(objects.main, [](lv_event_t * e) {
+            lv_event_code_t code = lv_event_get_code(e);
+
+            if (code >= LV_EVENT_PRESSED && code <= LV_EVENT_KEY) {
+                printf("[SPD SCRN] Code: %d | Key: %d\n\r",
+                       (int)code, (int)g_last_physical_key);
+            }
+
+            if (code == LV_EVENT_KEY) {
+                // Verify that the button released was actually KEY1 (Token 27)
+                if (g_last_physical_key == 27) {
+                    g_last_physical_key = 0;
+                    printf("Esc Home \n\r");
+
+                    if (g_speedometer_update_timer != nullptr) {
+                        lv_timer_pause(g_speedometer_update_timer);
+                        lv_timer_delete(g_speedometer_update_timer);
+                        g_speedometer_update_timer = nullptr;
+                    }
+
+                    g_request_indev_reset = true;
+                    lv_group_remove_obj((lv_obj_t *)lv_event_get_current_target(e));
+
+                    create_lvgl_home_screen();
+                }
+            }
+        }, LV_EVENT_ALL, NULL);
+        g_speedometer_esc_hooked = true;
+    }
+
+    // Refresh readings 5x/sec — plenty smooth for a needle, cheap enough to leave running
+    // only while this screen is actually visible.
+    if (g_speedometer_update_timer == nullptr) {
+        g_speedometer_update_timer = lv_timer_create(speedometer_update_timer_cb, 200, NULL);
+    }
+
+    // Force a fresh render cycle pass instantly
+    lv_refr_now(NULL);
+
+    //  POST-SPEEDOMETER INPUT DEVICE CHANNEL RECOVERY
+    lv_indev_t * indev = lv_indev_get_next(NULL);
+    if (indev != nullptr) {
+        lv_indev_reset(indev, NULL);
+    }
+}
+
 
 // 🌟 THE COMPACT BLINKING TIME CONTROLLER CALLBACK 🌟
 static void clock_timer_cb(lv_timer_t * timer) {
@@ -455,7 +591,7 @@ static void clock_timer_cb(lv_timer_t * timer) {
         lv_label_set_text(lbl_small_date, date_buf);
     }
 }
-extern bool g_request_indev_reset;
+
 void ShowDigitalClock() {
 	 if (clock_blink_timer != nullptr) {
         printf("In ShowDigitalClock!\n\r");
@@ -604,11 +740,14 @@ static void menu_icon_event_handler(lv_event_t * e) {
 			printf(" Saved ID:%d  \n\r", g_last_active_home_icon_id);
             //printf(" >> [RELEASE CLICK ACTION] KEY3 released on Icon ID: %d\n\r", (int)icon_id);
 			// Main Home Screen Selections
-			if (icon_id == 1) { // Clock ID
+			if (icon_id == 0) { // Speedometer ID
+				//printf(" -> Route To: ShowSpeedometerDetails()\n\r");
+				ShowSpeedometerDetails();
+			}
+			else if (icon_id == 1) { // Clock ID
 				//printf(" -> Route To: ShowDigitalClock()\n\r");
 				ShowDigitalClock();
 			}
-			// else if (icon_id == 0) { ShowSpeedometerDetails(); }
 			// else if (icon_id == 2) { ShowGraphDetails(); }
 			else if (icon_id == 3) { 
 				//printf(" -> Route To: ShowSettingsMenu()\n\r");
